@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accoda CSV fatture</title>
+  <style>
+    :root { font-family: Arial, Helvetica, sans-serif; color: #1f2937; background: #f6f7f9; }
+    body { margin: 0; padding: 24px; }
+    .container { max-width: 1100px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .subtitle { margin: 0 0 20px; color: #4b5563; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,.04); margin-bottom: 16px; }
+    label { display: block; font-weight: 700; margin-bottom: 8px; }
+    input[type="file"], input[type="text"] { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #d1d5db; border-radius: 10px; background: white; }
+    .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .option { display: flex; align-items: center; gap: 8px; padding: 10px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; }
+    button { border: 0; border-radius: 10px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+    .primary { background: #111827; color: white; }
+    .secondary { background: #e5e7eb; color: #111827; }
+    .danger { background: #fee2e2; color: #991b1b; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .buttons { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    .log { white-space: pre-wrap; background: #111827; color: #f9fafb; border-radius: 10px; padding: 12px; min-height: 86px; overflow: auto; font-family: Consolas, monospace; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f3f4f6; position: sticky; top: 0; }
+    .table-wrap { max-height: 390px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 10px; }
+    .small { font-size: 12px; color: #6b7280; }
+    .ok { color: #047857; font-weight: 700; }
+    .warn { color: #b45309; font-weight: 700; }
+    .error { color: #dc2626; font-weight: 700; }
+    @media (max-width: 800px) { .row, .options { grid-template-columns: 1fr; } body { padding: 14px; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Accoda CSV fatture</h1>
+    <p class="subtitle">Importa uno o più file CSV con intestazione uguale, rimuove le intestazioni ripetute e scarica un unico file CSV.</p>
+
+    <div class="card">
+      <label for="files">Seleziona i file CSV da unire</label>
+      <input id="files" type="file" accept=".csv,text/csv" multiple>
+      <p class="small">Formato previsto: campi separati da punto e virgola, valori tra virgolette, prima riga con intestazioni.</p>
+
+      <div class="row">
+        <div>
+          <label for="outputName">Nome file finale</label>
+          <input id="outputName" type="text" value="fatture_accodate.csv">
+        </div>
+        <div>
+          <label for="delimiter">Separatore output</label>
+          <input id="delimiter" type="text" value=";" maxlength="1">
+        </div>
+      </div>
+
+      <div class="options">
+        <label class="option"><input id="addSource" type="checkbox"> Aggiungi colonna con nome file origine</label>
+        <label class="option"><input id="skipEmpty" type="checkbox" checked> Ignora righe completamente vuote</label>
+        <label class="option"><input id="validateHeader" type="checkbox" checked> Controlla che le intestazioni coincidano</label>
+        <label class="option"><input id="bom" type="checkbox" checked> Aggiungi BOM UTF-8 per Excel</label>
+      </div>
+
+      <div class="buttons">
+        <button class="primary" id="mergeBtn">Unisci e scarica CSV</button>
+        <button class="secondary" id="previewBtn">Anteprima</button>
+        <button class="danger" id="resetBtn">Pulisci</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Esito elaborazione</label>
+      <div id="log" class="log">Nessun file selezionato.</div>
+    </div>
+
+    <div class="card">
+      <label>Anteprima prime righe</label>
+      <div id="preview" class="table-wrap"><p class="small" style="padding: 12px;">L'anteprima comparirà qui.</p></div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const filesInput = document.getElementById('files');
+  const mergeBtn = document.getElementById('mergeBtn');
+  const previewBtn = document.getElementById('previewBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const logEl = document.getElementById('log');
+  const previewEl = document.getElementById('preview');
+
+  function log(message) { logEl.textContent = message; }
+  function normalizeHeader(row) { return row.map(v => String(v).trim()).join('\u001f'); }
+
+  function parseCsv(text, delimiter) {
+    // Parser CSV semplice ma robusto: gestisce virgolette, separatori dentro virgolette e doppi apici escapati.
+    const rows = [];
+    let row = [];
+    let field = '';
+    let inQuotes = false;
+
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      const next = text[i + 1];
+
+      if (c === '"') {
+        if (inQuotes && next === '"') { field += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (c === delimiter && !inQuotes) {
+        row.push(field); field = '';
+      } else if ((c === '\n' || c === '\r') && !inQuotes) {
+        if (c === '\r' && next === '\n') i++;
+        row.push(field);
+        rows.push(row);
+        row = []; field = '';
+      } else {
+        field += c;
+      }
+    }
+    row.push(field);
+    rows.push(row);
+    return rows;
+  }
+
+  function csvEscape(value, delimiter) {
+    value = value == null ? '' : String(value);
+    const mustQuote = value.includes('"') || value.includes('\n') || value.includes('\r') || value.includes(delimiter);
+    const escaped = value.replace(/"/g, '""');
+    return mustQuote ? '"' + escaped + '"' : '"' + escaped + '"';
+  }
+
+  async function readFileAsText(file) {
+    const buffer = await file.arrayBuffer();
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    return decoder.decode(buffer);
+  }
+
+  function isEmptyRow(row) { return row.every(v => String(v).trim() === ''); }
+
+  async function buildMergedData() {
+    const files = Array.from(filesInput.files || []);
+    const delimiter = document.getElementById('delimiter').value || ';';
+    const addSource = document.getElementById('addSource').checked;
+    const skipEmpty = document.getElementById('skipEmpty').checked;
+    const validateHeader = document.getElementById('validateHeader').checked;
+
+    if (!files.length) throw new Error('Selezionare almeno un file CSV.');
+    if (delimiter.length !== 1) throw new Error('Il separatore deve essere un solo carattere.');
+
+    let finalHeader = null;
+    let finalHeaderKey = null;
+    const dataRows = [];
+    const messages = [];
+
+    for (const file of files) {
+      const text = await readFileAsText(file);
+      let rows = parseCsv(text, delimiter);
+      if (skipEmpty) rows = rows.filter(r => !isEmptyRow(r));
+      if (!rows.length) { messages.push('⚠ ' + file.name + ': file vuoto, ignorato.'); continue; }
+
+      const header = rows[0];
+      const headerKey = normalizeHeader(header);
+      if (!finalHeader) {
+        finalHeader = addSource ? [...header, 'File origine'] : [...header];
+        finalHeaderKey = headerKey;
+      } else if (validateHeader && headerKey !== finalHeaderKey) {
+        throw new Error('Intestazioni diverse nel file "' + file.name + '". Disattivare il controllo intestazioni solo se si è certi della compatibilità.');
+      }
+
+      const body = rows.slice(1);
+      for (const r of body) dataRows.push(addSource ? [...r, file.name] : r);
+      messages.push('✓ ' + file.name + ': ' + body.length + ' righe accodate.');
+    }
+
+    if (!finalHeader) throw new Error('Nessuna intestazione valida trovata.');
+    const allRows = [finalHeader, ...dataRows];
+    const csv = allRows.map(r => r.map(v => csvEscape(v, delimiter)).join(delimiter)).join('\r\n');
+    return { csv, rows: allRows, messages, totalRows: dataRows.length, fileCount: files.length };
+  }
+
+  function showPreview(rows) {
+    const previewRows = rows.slice(0, 21);
+    if (!previewRows.length) return;
+    const header = previewRows[0];
+    const body = previewRows.slice(1);
+    let html = '<table><thead><tr>' + header.map(h => '<th>' + escapeHtml(h) + '</th>').join('') + '</tr></thead><tbody>';
+    html += body.map(r => '<tr>' + header.map((_, i) => '<td>' + escapeHtml(r[i] || '') + '</td>').join('') + '</tr>').join('');
+    html += '</tbody></table>';
+    previewEl.innerHTML = html;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  }
+
+  async function previewOnly() {
+    try {
+      const result = await buildMergedData();
+      log(result.messages.join('\n') + '\n\nTotale file: ' + result.fileCount + '\nTotale righe dati: ' + result.totalRows + '\nAnteprima generata.');
+      showPreview(result.rows);
+    } catch (err) { log('ERRORE: ' + err.message); }
+  }
+
+  async function mergeAndDownload() {
+    try {
+      const result = await buildMergedData();
+      const addBom = document.getElementById('bom').checked;
+      const outputName = (document.getElementById('outputName').value || 'fatture_accodate.csv').trim();
+      const blob = new Blob([(addBom ? '\ufeff' : '') + result.csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outputName.toLowerCase().endsWith('.csv') ? outputName : outputName + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      log(result.messages.join('\n') + '\n\nTotale file: ' + result.fileCount + '\nTotale righe dati accodate: ' + result.totalRows + '\nFile scaricato: ' + a.download);
+      showPreview(result.rows);
+    } catch (err) { log('ERRORE: ' + err.message); }
+  }
+
+  resetBtn.addEventListener('click', () => {
+    filesInput.value = '';
+    log('Nessun file selezionato.');
+    previewEl.innerHTML = '<p class="small" style="padding: 12px;">L\'anteprima comparirà qui.</p>';
+  });
+  previewBtn.addEventListener('click', previewOnly);
+  mergeBtn.addEventListener('click', mergeAndDownload);
+})();
+</script>
+</body>
+</html>
